@@ -661,6 +661,18 @@ async function tgSend(chatId, text, extra={}) {
     }
 }
 
+async function tgEdit(chatId, msgId, text, extra={}) {
+    try {
+        await tgRequest('editMessageText', { chat_id:chatId, message_id:msgId, text, parse_mode:'Markdown', ...extra });
+    } catch(e) {
+        if (!e.message.includes('not modified')) console.error('[tgEdit]', e.message);
+    }
+}
+
+async function tgAnswerCallback(callbackId, text='', alert=false) {
+    await tgRequest('answerCallbackQuery', { callback_query_id:callbackId, text, show_alert:alert }).catch(()=>{});
+}
+
 async function tgSendTyping(chatId) {
     await tgRequest('sendChatAction', { chat_id:chatId, action:'typing' }).catch(()=>{});
 }
@@ -671,7 +683,6 @@ async function tgSendDocumentAction(chatId) {
     await tgRequest('sendChatAction', { chat_id:chatId, action:'upload_document' }).catch(()=>{});
 }
 
-// إرسال ملف صوتي (OGG)
 async function tgSendVoice(chatId, oggBuffer, replyToId=null) {
     const form = new FormData();
     form.append('chat_id', String(chatId));
@@ -683,7 +694,6 @@ async function tgSendVoice(chatId, oggBuffer, replyToId=null) {
     return data.result;
 }
 
-// تقسيم الرسائل الطويلة (تيليغرام حد 4096 حرف)
 function splitTgMessage(text, maxLen=4000) {
     if (!text||text.length<=maxLen) return [text||''];
     const chunks=[]; let remaining=text;
@@ -698,7 +708,6 @@ function splitTgMessage(text, maxLen=4000) {
     return chunks.filter(c=>c.length>0);
 }
 
-// تنزيل ملف من تيليغرام
 async function tgDownloadFile(fileId) {
     const fileInfo = await tgRequest('getFile', { file_id:fileId });
     const fileUrl  = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.file_path}`;
@@ -706,6 +715,494 @@ async function tgDownloadFile(fileId) {
     if (!res.ok) throw new Error(`[tgDownloadFile] HTTP ${res.status}`);
     const arrayBuffer = await res.arrayBuffer();
     return { buffer:Buffer.from(arrayBuffer), filePath:fileInfo.file_path };
+}
+
+// ============================================================
+// ADMIN DASHBOARD — لوحة التحكم الكاملة بأزرار Inline
+// ============================================================
+
+// حالة الأدمن في لوحة التحكم (انتظار إدخال)
+const _adminState = {}; // { chatId: { action, data } }
+
+// ── بناء لوحة التحكم الرئيسية ──
+function buildMainDashboard() {
+    const totalUsers = Object.keys(welcomedUsers).length;
+    const activeNow  = Object.keys(userChats).filter(id=>userChats[id]?.length>0).length;
+    const vipCount   = vipNumbers.length;
+    const blCount    = blacklist.length;
+    const now = new Date().toLocaleString('ar-SA', { timeZone:'Asia/Jerusalem' });
+
+    const text =
+        `🎛️ *لوحة تحكم MedTerm AI — تيليغرام*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `🕐 ${now}\n\n` +
+        `📊 *نظرة عامة:*\n` +
+        `👥 إجمالي المستخدمين: *${totalUsers}*\n` +
+        `🟢 نشطون الآن: *${activeNow}*\n` +
+        `⭐ مستخدمو VIP: *${vipCount}*\n` +
+        `⛔ محظورون: *${blCount}*\n\n` +
+        `📈 *الإحصائيات الكلية:*\n` +
+        `💬 الرسائل: *${stats.totalMessages||0}*\n` +
+        `🖼️ الصور: *${stats.totalImages||0}*\n` +
+        `📄 الملفات: *${stats.totalDocs||0}*\n` +
+        `🧠 جلسات في الذاكرة: *${Object.keys(userChats).length}*`;
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text:'👥 المستخدمون', callback_data:'dash:users:0' },
+                { text:'⭐ VIP', callback_data:'dash:vip' }
+            ],
+            [
+                { text:'⛔ المحظورون', callback_data:'dash:blacklist' },
+                { text:'📊 إحصائيات', callback_data:'dash:stats' }
+            ],
+            [
+                { text:'➕ تفعيل VIP', callback_data:'dash:addvip_prompt' },
+                { text:'➖ إزالة VIP', callback_data:'dash:removevip_prompt' }
+            ],
+            [
+                { text:'🚫 حظر مستخدم', callback_data:'dash:block_prompt' },
+                { text:'✅ رفع حظر', callback_data:'dash:unblock_prompt' }
+            ],
+            [
+                { text:'📢 بث جماعي', callback_data:'dash:broadcast_prompt' },
+                { text:'🔄 تصفير رصيد', callback_data:'dash:reset_prompt' }
+            ],
+            [
+                { text:'🔔 الإشعارات', callback_data:'dash:notifications' },
+                { text:'🔁 تحديث', callback_data:'dash:refresh' }
+            ]
+        ]
+    };
+    return { text, keyboard };
+}
+
+// ── قائمة المستخدمين مع التفاصيل ──
+function buildUsersList(page=0, perPage=5) {
+    const allIds = Object.keys(welcomedUsers);
+    const total  = allIds.length;
+    const start  = page * perPage;
+    const pageIds = allIds.slice(start, start + perPage);
+
+    let text = `👥 *المستخدمون* (${start+1}-${Math.min(start+perPage, total)} من ${total})\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    for (const id of pageIds) {
+        const name    = userNames[id] || '(بدون اسم)';
+        const isVIP   = vipNumbers.includes(id);
+        const isBL    = blacklist.includes(id);
+        const rec     = userLimitsUsage[id] || {};
+        const lastSeen = userChatLastSeen[id] ? new Date(userChatLastSeen[id]).toLocaleString('ar-SA',{timeZone:'Asia/Jerusalem'}) : 'لم يتفاعل';
+        const badge   = isVIP ? '⭐' : isBL ? '⛔' : '👤';
+
+        text +=
+            `${badge} *${name}*\n` +
+            `🆔 ID: \`${id}\`\n` +
+            `💬 رسائل: ${rec.messages||0} | 🖼️ صور: ${rec.images||0} | 📄 ملفات: ${rec.docs||0}\n` +
+            `🕐 آخر نشاط: ${lastSeen}\n\n`;
+    }
+
+    const buttons = [];
+    // أزرار إدارة سريعة لكل مستخدم
+    for (const id of pageIds) {
+        const name = (userNames[id]||id).slice(0,15);
+        const isVIP = vipNumbers.includes(id);
+        const isBL  = blacklist.includes(id);
+        buttons.push([
+            { text: `${isVIP?'⭐':'➕VIP'} ${name}`, callback_data: isVIP ? `dash:removevip:${id}` : `dash:addvip:${id}` },
+            { text: `${isBL?'✅رفع':'🚫حظر'} ${name}`, callback_data: isBL ? `dash:unblock:${id}` : `dash:block:${id}` },
+            { text: `🔄 تصفير ${name}`, callback_data: `dash:reset:${id}` }
+        ]);
+    }
+
+    // أزرار التنقل
+    const navRow = [];
+    if (page > 0) navRow.push({ text:'◀️ السابق', callback_data:`dash:users:${page-1}` });
+    navRow.push({ text:`${page+1}/${Math.ceil(total/perPage)||1}`, callback_data:'dash:noop' });
+    if (start+perPage < total) navRow.push({ text:'التالي ▶️', callback_data:`dash:users:${page+1}` });
+    buttons.push(navRow);
+    buttons.push([{ text:'🔙 الرئيسية', callback_data:'dash:main' }]);
+
+    return { text, keyboard: { inline_keyboard: buttons } };
+}
+
+// ── قائمة VIP ──
+function buildVIPList() {
+    if (!vipNumbers.length) {
+        return {
+            text: '⭐ *قائمة VIP فارغة*\n\nلا يوجد مستخدمون VIP حتى الآن.',
+            keyboard: { inline_keyboard: [[{text:'➕ تفعيل VIP جديد', callback_data:'dash:addvip_prompt'},{text:'🔙 رجوع', callback_data:'dash:main'}]] }
+        };
+    }
+    let text = `⭐ *مستخدمو VIP* (${vipNumbers.length})\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+    const buttons = [];
+    for (const id of vipNumbers) {
+        const name = userNames[id]||'(بدون اسم)';
+        const exp  = vipExpiry[id];
+        const expStr = exp ? new Date(exp).toLocaleDateString('ar-SA',{timeZone:'Asia/Jerusalem'}) : 'دائم';
+        text += `⭐ *${name}*\n🆔 \`${id}\`\n📅 ينتهي: ${expStr}\n\n`;
+        buttons.push([
+            { text:`➖ إزالة VIP — ${name.slice(0,15)}`, callback_data:`dash:removevip:${id}` }
+        ]);
+    }
+    buttons.push([{text:'🔙 الرئيسية', callback_data:'dash:main'}]);
+    return { text, keyboard:{ inline_keyboard:buttons } };
+}
+
+// ── قائمة المحظورين ──
+function buildBlacklist() {
+    if (!blacklist.length) {
+        return {
+            text: '⛔ *قائمة الحظر فارغة*\n\nلا يوجد مستخدمون محظورون.',
+            keyboard: { inline_keyboard: [[{text:'🚫 حظر مستخدم', callback_data:'dash:block_prompt'},{text:'🔙 رجوع', callback_data:'dash:main'}]] }
+        };
+    }
+    let text = `⛔ *المحظورون* (${blacklist.length})\n━━━━━━━━━━━━━━━━━━━━\n\n`;
+    const buttons = [];
+    for (const id of blacklist) {
+        const name = userNames[id]||'(بدون اسم)';
+        text += `⛔ *${name}*\n🆔 \`${id}\`\n\n`;
+        buttons.push([{ text:`✅ رفع حظر — ${name.slice(0,15)}`, callback_data:`dash:unblock:${id}` }]);
+    }
+    buttons.push([{text:'🔙 الرئيسية', callback_data:'dash:main'}]);
+    return { text, keyboard:{ inline_keyboard:buttons } };
+}
+
+// ── الإحصائيات التفصيلية ──
+function buildDetailedStats() {
+    const allIds = Object.keys(welcomedUsers);
+    const vipIds = vipNumbers;
+    const now = Date.now();
+
+    // أكثر المستخدمين نشاطاً
+    const sorted = allIds
+        .map(id=>({ id, msgs:(userLimitsUsage[id]?.messages||0) }))
+        .sort((a,b)=>b.msgs-a.msgs)
+        .slice(0,5);
+
+    let text =
+        `📊 *الإحصائيات التفصيلية*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `👥 *المستخدمون:*\n` +
+        `• إجمالي: ${allIds.length}\n` +
+        `• VIP: ${vipIds.length}\n` +
+        `• محظورون: ${blacklist.length}\n` +
+        `• نشطون (جلسة): ${Object.keys(userChats).filter(id=>userChats[id]?.length>0).length}\n\n` +
+        `📈 *الاستخدام الكلي:*\n` +
+        `• 💬 رسائل: ${stats.totalMessages||0}\n` +
+        `• 🖼️ صور محللة: ${stats.totalImages||0}\n` +
+        `• 📄 ملفات PDF: ${stats.totalDocs||0}\n\n` +
+        `🏆 *الأكثر استخداماً:*\n`;
+
+    for (let i=0; i<sorted.length; i++) {
+        const u = sorted[i];
+        const name = userNames[u.id]||u.id;
+        text += `${i+1}. ${name} — ${u.msgs} رسالة\n`;
+    }
+
+    return {
+        text,
+        keyboard:{ inline_keyboard:[
+            [{text:'🔙 الرئيسية', callback_data:'dash:main'},{text:'🔁 تحديث', callback_data:'dash:stats'}]
+        ]}
+    };
+}
+
+// ── إشعارات ──
+function buildNotificationsPanel() {
+    const text =
+        `🔔 *إعدادات الإشعارات*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `الإشعارات الفورية مفعّلة تلقائياً:\n\n` +
+        `✅ مستخدم جديد يدخل\n` +
+        `✅ انتهاء رصيد مستخدم\n` +
+        `✅ انتهاء VIP تلقائياً\n` +
+        `✅ أخطاء API\n\n` +
+        `_كل هذه الإشعارات تصلك فور حدوثها._`;
+    return {
+        text,
+        keyboard:{ inline_keyboard:[
+            [{text:'📢 بث جماعي الآن', callback_data:'dash:broadcast_prompt'}],
+            [{text:'🔙 الرئيسية', callback_data:'dash:main'}]
+        ]}
+    };
+}
+
+// ── إرسال/تحديث لوحة التحكم ──
+async function sendDashboard(chatId, msgIdToEdit=null) {
+    const { text, keyboard } = buildMainDashboard();
+    if (msgIdToEdit) {
+        await tgEdit(chatId, msgIdToEdit, text, { reply_markup: keyboard });
+    } else {
+        await tgRequest('sendMessage', { chat_id:chatId, text, parse_mode:'Markdown', reply_markup:keyboard });
+    }
+}
+
+// ============================================================
+// CALLBACK QUERY HANDLER — معالج أزرار لوحة التحكم
+// ============================================================
+async function handleCallback(update) {
+    const cb      = update.callback_query;
+    if (!cb) return;
+
+    const chatId   = cb.message?.chat?.id;
+    const msgId    = cb.message?.message_id;
+    const userId   = cb.from?.id;
+    const data     = cb.data||'';
+
+    if (!chatId||!msgId) { await tgAnswerCallback(cb.id); return; }
+    if (!ADMIN_TG_ID||userId!==ADMIN_TG_ID) {
+        await tgAnswerCallback(cb.id, '⛔ غير مصرح لك', true);
+        return;
+    }
+
+    await tgAnswerCallback(cb.id);
+
+    try {
+        // ── الرئيسية ──
+        if (data==='dash:main'||data==='dash:refresh') {
+            await sendDashboard(chatId, msgId);
+            return;
+        }
+        if (data==='dash:noop') return;
+
+        // ── المستخدمون ──
+        if (data.startsWith('dash:users:')) {
+            const page = parseInt(data.split(':')[2]||'0',10);
+            const { text, keyboard } = buildUsersList(page);
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── VIP قائمة ──
+        if (data==='dash:vip') {
+            const { text, keyboard } = buildVIPList();
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── تفعيل VIP مباشرة من قائمة المستخدمين ──
+        if (data.startsWith('dash:addvip:')) {
+            const id = data.split(':')[2];
+            if (!vipNumbers.includes(id)) {
+                vipNumbers.push(id);
+                vipExpiry[id] = Date.now()+30*24*60*60_000;
+                resetUserUsage(id);
+                saveData();
+                await tgSend(id, '🌟 *تهانينا! تم تفعيل اشتراكك المميز (VIP)*\nرسائل وصور وصوت غير محدودة ✨').catch(()=>{});
+                await tgRequest('answerCallbackQuery',{callback_query_id:cb.id,text:`✅ تم تفعيل VIP للـ ID: ${id}`,show_alert:true}).catch(()=>{});
+            }
+            const page = 0;
+            const { text, keyboard } = buildUsersList(page);
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── إزالة VIP مباشرة ──
+        if (data.startsWith('dash:removevip:')) {
+            const id = data.split(':')[2];
+            const was = vipNumbers.includes(id);
+            vipNumbers = vipNumbers.filter(n=>n!==id);
+            delete vipExpiry[id];
+            saveData();
+            if (was) await tgSend(id, 'ℹ️ تم إلغاء اشتراكك المميز (VIP).').catch(()=>{});
+            await tgRequest('answerCallbackQuery',{callback_query_id:cb.id,text:was?`✅ تم إزالة VIP`:'لم يكن VIP',show_alert:true}).catch(()=>{});
+            const { text, keyboard } = buildVIPList();
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── حظر مباشر ──
+        if (data.startsWith('dash:block:')) {
+            const id = data.split(':')[2];
+            if (!blacklist.includes(id)) { blacklist.push(id); saveData(); }
+            await tgRequest('answerCallbackQuery',{callback_query_id:cb.id,text:`⛔ تم حظر ${id}`,show_alert:true}).catch(()=>{});
+            const page = 0;
+            const { text, keyboard } = buildUsersList(page);
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── رفع حظر مباشر ──
+        if (data.startsWith('dash:unblock:')) {
+            const id = data.split(':')[2];
+            const idx = blacklist.indexOf(id);
+            if (idx>-1) { blacklist.splice(idx,1); saveData(); }
+            await tgRequest('answerCallbackQuery',{callback_query_id:cb.id,text:`✅ تم رفع الحظر`,show_alert:true}).catch(()=>{});
+            const { text, keyboard } = buildBlacklist();
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── تصفير رصيد مباشر ──
+        if (data.startsWith('dash:reset:')) {
+            const id = data.split(':')[2];
+            resetUserUsage(id);
+            await tgRequest('answerCallbackQuery',{callback_query_id:cb.id,text:`✅ تم تصفير رصيد ${id}`,show_alert:true}).catch(()=>{});
+            return;
+        }
+
+        // ── Blacklist قائمة ──
+        if (data==='dash:blacklist') {
+            const { text, keyboard } = buildBlacklist();
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── إحصائيات ──
+        if (data==='dash:stats') {
+            const { text, keyboard } = buildDetailedStats();
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── الإشعارات ──
+        if (data==='dash:notifications') {
+            const { text, keyboard } = buildNotificationsPanel();
+            await tgEdit(chatId, msgId, text, { reply_markup:keyboard });
+            return;
+        }
+
+        // ── Prompts (طلب إدخال) ──
+        if (data==='dash:addvip_prompt') {
+            _adminState[chatId] = { action:'addvip', msgId };
+            await tgEdit(chatId, msgId,
+                '➕ *تفعيل VIP*\n\nأرسل *Telegram ID* للمستخدم الذي تريد تفعيل VIP له:\n_(مثال: 123456789)_',
+                { reply_markup:{ inline_keyboard:[[{text:'❌ إلغاء', callback_data:'dash:main'}]] } }
+            );
+            return;
+        }
+        if (data==='dash:removevip_prompt') {
+            _adminState[chatId] = { action:'removevip', msgId };
+            await tgEdit(chatId, msgId,
+                '➖ *إزالة VIP*\n\nأرسل *Telegram ID* للمستخدم:',
+                { reply_markup:{ inline_keyboard:[[{text:'❌ إلغاء', callback_data:'dash:main'}]] } }
+            );
+            return;
+        }
+        if (data==='dash:block_prompt') {
+            _adminState[chatId] = { action:'block', msgId };
+            await tgEdit(chatId, msgId,
+                '🚫 *حظر مستخدم*\n\nأرسل *Telegram ID* للمستخدم:',
+                { reply_markup:{ inline_keyboard:[[{text:'❌ إلغاء', callback_data:'dash:main'}]] } }
+            );
+            return;
+        }
+        if (data==='dash:unblock_prompt') {
+            _adminState[chatId] = { action:'unblock', msgId };
+            await tgEdit(chatId, msgId,
+                '✅ *رفع الحظر*\n\nأرسل *Telegram ID* للمستخدم:',
+                { reply_markup:{ inline_keyboard:[[{text:'❌ إلغاء', callback_data:'dash:main'}]] } }
+            );
+            return;
+        }
+        if (data==='dash:broadcast_prompt') {
+            _adminState[chatId] = { action:'broadcast', msgId };
+            await tgEdit(chatId, msgId,
+                '📢 *بث جماعي*\n\nأرسل نص الرسالة التي تريد إرسالها لجميع المستخدمين:',
+                { reply_markup:{ inline_keyboard:[[{text:'❌ إلغاء', callback_data:'dash:main'}]] } }
+            );
+            return;
+        }
+        if (data==='dash:reset_prompt') {
+            _adminState[chatId] = { action:'reset', msgId };
+            await tgEdit(chatId, msgId,
+                '🔄 *تصفير رصيد*\n\nأرسل *Telegram ID* للمستخدم:',
+                { reply_markup:{ inline_keyboard:[[{text:'❌ إلغاء', callback_data:'dash:main'}]] } }
+            );
+            return;
+        }
+    } catch(e) {
+        console.error('[handleCallback]', e.message);
+    }
+}
+
+// ============================================================
+// ADMIN STATE — معالجة إدخالات الأدمن بعد الضغط على الأزرار
+// ============================================================
+async function handleAdminInput(chatId, senderId, text, msgId) {
+    const state = _adminState[chatId];
+    if (!state) return false;
+    if (senderId !== ADMIN_TG_ID) return false;
+
+    const { action, msgId:dashMsgId } = state;
+    delete _adminState[chatId];
+
+    // حذف رسالة الأدمن النصية
+    await tgRequest('deleteMessage', { chat_id:chatId, message_id:msgId }).catch(()=>{});
+
+    switch(action) {
+        case 'addvip': {
+            const id = text.trim().replace(/\D/g,'');
+            if (!id) { await sendDashboard(chatId, dashMsgId); return true; }
+            if (!vipNumbers.includes(id)) {
+                vipNumbers.push(id);
+                vipExpiry[id] = Date.now()+30*24*60*60_000;
+                resetUserUsage(id);
+                saveData();
+                await tgSend(id, '🌟 *تهانينا! تم تفعيل اشتراكك المميز (VIP)*\nرسائل وصور وصوت غير محدودة ✨').catch(()=>{});
+                await tgSend(chatId, `✅ تم تفعيل VIP للـ ID: \`${id}\` (${userNames[id]||'مستخدم'})`);
+            } else {
+                await tgSend(chatId, `⚠️ \`${id}\` VIP أصلاً.`);
+            }
+            await sendDashboard(chatId, dashMsgId);
+            return true;
+        }
+        case 'removevip': {
+            const id = text.trim().replace(/\D/g,'');
+            if (!id) { await sendDashboard(chatId, dashMsgId); return true; }
+            const was = vipNumbers.includes(id);
+            vipNumbers = vipNumbers.filter(n=>n!==id);
+            delete vipExpiry[id];
+            saveData();
+            if (was) {
+                await tgSend(id, 'ℹ️ تم إلغاء اشتراكك المميز (VIP).').catch(()=>{});
+                await tgSend(chatId, `✅ تم إزالة VIP عن \`${id}\`.`);
+            } else {
+                await tgSend(chatId, `⚠️ \`${id}\` لم يكن VIP.`);
+            }
+            await sendDashboard(chatId, dashMsgId);
+            return true;
+        }
+        case 'block': {
+            const id = text.trim().replace(/\D/g,'');
+            if (!id) { await sendDashboard(chatId, dashMsgId); return true; }
+            if (!blacklist.includes(id)) { blacklist.push(id); saveData(); }
+            await tgSend(chatId, `⛔ تم حظر \`${id}\`.`);
+            await sendDashboard(chatId, dashMsgId);
+            return true;
+        }
+        case 'unblock': {
+            const id = text.trim().replace(/\D/g,'');
+            if (!id) { await sendDashboard(chatId, dashMsgId); return true; }
+            const idx = blacklist.indexOf(id);
+            if (idx>-1) { blacklist.splice(idx,1); saveData(); }
+            await tgSend(chatId, `✅ تم رفع الحظر عن \`${id}\`.`);
+            await sendDashboard(chatId, dashMsgId);
+            return true;
+        }
+        case 'reset': {
+            const id = text.trim().replace(/\D/g,'');
+            if (!id) { await sendDashboard(chatId, dashMsgId); return true; }
+            resetUserUsage(id);
+            await tgSend(chatId, `✅ تم تصفير رصيد \`${id}\`.`);
+            await sendDashboard(chatId, dashMsgId);
+            return true;
+        }
+        case 'broadcast': {
+            const msg = text.trim();
+            if (!msg) { await sendDashboard(chatId, dashMsgId); return true; }
+            const allUsers = Object.keys(welcomedUsers).filter(id=>id!==String(ADMIN_TG_ID));
+            let sent=0, failed=0;
+            await tgSend(chatId, `📢 جاري الإرسال لـ ${allUsers.length} مستخدم...`);
+            for (const uid of allUsers) {
+                try { await tgSend(uid, msg); sent++; await new Promise(r=>setTimeout(r,300)); }
+                catch { failed++; }
+            }
+            await tgSend(chatId, `📢 *انتهى البث:*\n✅ وصل: ${sent}\n❌ فشل: ${failed}`);
+            await sendDashboard(chatId, dashMsgId);
+            return true;
+        }
+    }
+    return false;
 }
 
 // ============================================================
@@ -762,6 +1259,9 @@ async function handleMessage(update) {
     // ============================================================
     // رسالة الترحيب
     // ============================================================
+    // ============================================================
+    // رسالة الترحيب + إشعار الأدمن بمستخدم جديد
+    // ============================================================
     if (!welcomedUsers[senderId]) {
         welcomedUsers[senderId] = true;
         userChats[senderId] = [];
@@ -771,13 +1271,42 @@ async function handleMessage(update) {
         }
         saveData();
         await reply(buildWelcome(userName));
+
+        // ✅ إشعار الأدمن بمستخدم جديد مع كل التفاصيل
+        const username_tg = msg.from?.username ? `@${msg.from.username}` : '(بدون username)';
+        await notifyAdmin(
+            `👤 *مستخدم جديد دخل البوت!*\n\n` +
+            `الاسم: *${userName||'(بدون اسم)'}*\n` +
+            `🆔 ID: \`${senderId}\`\n` +
+            `📱 Username: ${username_tg}\n` +
+            `🌐 اللغة: ${msg.from?.language_code||'غير معروفة'}\n` +
+            `📅 الوقت: ${new Date().toLocaleString('ar-SA',{timeZone:'Asia/Jerusalem'})}\n\n` +
+            `إجمالي المستخدمين الآن: *${Object.keys(welcomedUsers).length}*`
+        );
+
         if (!body && msgType==='text') return;
     }
 
     userChatLastSeen[senderId] = Date.now();
 
     // ============================================================
-    // أوامر الأدمن
+    // لوحة التحكم — /admin أو !لوحة
+    // ============================================================
+    if (isAdmin && (body==='/admin'||body==='!لوحة'||body==='!dashboard')) {
+        await sendDashboard(chatId);
+        return;
+    }
+
+    // ============================================================
+    // معالجة إدخالات الأدمن (بعد الضغط على أزرار اللوحة)
+    // ============================================================
+    if (isAdmin && _adminState[chatId]) {
+        const handled = await handleAdminInput(chatId, userId, body, msgId);
+        if (handled) return;
+    }
+
+    // ============================================================
+    // أوامر الأدمن النصية (للتوافق مع الإصدار القديم)
     // ============================================================
     if (isAdmin) {
         const removeVipM = body.match(/^!removevip\s+(\d+)/i);
@@ -828,19 +1357,8 @@ async function handleMessage(update) {
             return;
         }
         if (body === '!stats') {
-            const totalUsers = Object.keys(welcomedUsers).length;
-            const vipCount   = vipNumbers.length;
-            const blCount    = blacklist.length;
-            await reply(
-                `📊 *إحصائيات البوت (تيليغرام)*\n\n` +
-                `👥 إجمالي المستخدمين: ${totalUsers}\n` +
-                `⭐ مستخدمو VIP: ${vipCount}\n` +
-                `⛔ محظورون: ${blCount}\n` +
-                `💬 إجمالي الرسائل: ${stats.totalMessages||0}\n` +
-                `🖼️ إجمالي الصور: ${stats.totalImages||0}\n` +
-                `📄 إجمالي الملفات: ${stats.totalDocs||0}\n` +
-                `🧠 جلسات نشطة: ${Object.keys(userChats).length}`
-            );
+            const { text } = buildDetailedStats();
+            await reply(text);
             return;
         }
         if (body.startsWith('!broadcast ')) {
@@ -1338,11 +1856,19 @@ let _isRunning = true;
 async function poll() {
     while (_isRunning) {
         try {
-            const updates = await tgRequest('getUpdates', { offset:_offset, timeout:30, allowed_updates:['message','edited_message'] });
+            const updates = await tgRequest('getUpdates', {
+                offset:_offset,
+                timeout:30,
+                allowed_updates:['message','edited_message','callback_query']
+            });
             if (updates && updates.length) {
                 for (const update of updates) {
                     _offset = update.update_id + 1;
-                    handleMessage(update).catch(e=>console.error('[handleMessage]', e.message));
+                    if (update.callback_query) {
+                        handleCallback(update).catch(e=>console.error('[handleCallback]', e.message));
+                    } else {
+                        handleMessage(update).catch(e=>console.error('[handleMessage]', e.message));
+                    }
                 }
             }
         } catch(e) {
