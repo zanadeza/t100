@@ -949,7 +949,7 @@ async function handleCallback(update) {
     const data     = cb.data||'';
 
     if (!chatId||!msgId) { await tgAnswerCallback(cb.id); return; }
-    if (!ADMIN_TG_ID||userId!==ADMIN_TG_ID) {
+    if (!ADMIN_TG_ID || String(userId) !== String(ADMIN_TG_ID)) {
         await tgAnswerCallback(cb.id, '⛔ غير مصرح لك', true);
         return;
     }
@@ -1013,6 +1013,11 @@ async function handleCallback(update) {
         // ── حظر مباشر ──
         if (data.startsWith('dash:block:')) {
             const id = data.split(':')[2];
+            // ✅ حماية: لا يمكن حظر الأدمن
+            if (String(id) === String(ADMIN_TG_ID)) {
+                await tgRequest('answerCallbackQuery',{callback_query_id:cb.id,text:'⛔ لا يمكن حظر الأدمن',show_alert:true}).catch(()=>{});
+                return;
+            }
             if (!blacklist.includes(id)) { blacklist.push(id); saveData(); }
             await tgRequest('answerCallbackQuery',{callback_query_id:cb.id,text:`⛔ تم حظر ${id}`,show_alert:true}).catch(()=>{});
             const page = 0;
@@ -1121,7 +1126,7 @@ async function handleCallback(update) {
 async function handleAdminInput(chatId, senderId, text, msgId) {
     const state = _adminState[chatId];
     if (!state) return false;
-    if (senderId !== ADMIN_TG_ID) return false;
+    if (String(senderId) !== String(ADMIN_TG_ID)) return false;
 
     const { action, msgId:dashMsgId } = state;
     delete _adminState[chatId];
@@ -1165,6 +1170,11 @@ async function handleAdminInput(chatId, senderId, text, msgId) {
         case 'block': {
             const id = text.trim().replace(/\D/g,'');
             if (!id) { await sendDashboard(chatId, dashMsgId); return true; }
+            if (String(id) === String(ADMIN_TG_ID)) {
+                await tgSend(chatId, '⛔ لا يمكن حظر حساب الأدمن.');
+                await sendDashboard(chatId, dashMsgId);
+                return true;
+            }
             if (!blacklist.includes(id)) { blacklist.push(id); saveData(); }
             await tgSend(chatId, `⛔ تم حظر \`${id}\`.`);
             await sendDashboard(chatId, dashMsgId);
@@ -1214,18 +1224,19 @@ async function handleMessage(update) {
 
     const chatId   = msg.chat.id;
     const senderId = String(msg.from?.id||chatId);
-    const isAdmin  = ADMIN_TG_ID && msg.from?.id === ADMIN_TG_ID;
+    // ✅ المقارنة بـ String لتجنب خطأ Number vs String
+    const isAdmin  = ADMIN_TG_ID > 0 && String(msg.from?.id) === String(ADMIN_TG_ID);
     const isGroup  = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     const msgId    = msg.message_id;
 
     // دوال الرد المحلية
     const reply = async (text) => tgSend(chatId, text, { reply_to_message_id:msgId });
-    const react = async (emoji) => { /* تيليغرام يدعم الـ reactions في API متأخر — نستخدم تعليق بسيط */ };
+    const react = async (emoji) => { /* تيليغرام يدعم الـ reactions في API متأخر */ };
 
     // ============================================================
-    // فحص الحظر
+    // فحص الحظر — الأدمن لا يُحظر أبداً حتى لو أُضيف للقائمة بالخطأ
     // ============================================================
-    if (blacklist.includes(senderId)) {
+    if (!isAdmin && blacklist.includes(senderId)) {
         const now = Date.now();
         const lastBl = _lastNotify[`bl_${senderId}`]||0;
         if (now-lastBl > 60*60_000) {
@@ -1344,8 +1355,13 @@ async function handleMessage(update) {
         const blackM = body.match(/^!block\s+(\d+)/i);
         if (blackM) {
             const num = blackM[1];
+            // ✅ حماية: لا يمكن حظر الأدمن أبداً
+            if (String(num) === String(ADMIN_TG_ID)) {
+                await reply('⛔ لا يمكن حظر حساب الأدمن.');
+                return;
+            }
             if (!blacklist.includes(num)) { blacklist.push(num); saveData(); }
-            await reply(`⛔ تم حظر ${num}.`);
+            await reply(`⛔ تم حظر \`${num}\`.`);
             return;
         }
         const unblockM = body.match(/^!unblock\s+(\d+)/i);
@@ -1901,6 +1917,17 @@ async function poll() {
 
 // مسح الـ webhook القديم إن وُجد (نستخدم polling)
 tgRequest('deleteWebhook').catch(()=>{});
+
+// ✅ تأمين: تأكد من أن الأدمن ليس في قائمة الحظر أبداً
+if (ADMIN_TG_ID > 0) {
+    const adminStr = String(ADMIN_TG_ID);
+    const idx = blacklist.indexOf(adminStr);
+    if (idx > -1) {
+        blacklist.splice(idx, 1);
+        saveData();
+        console.log('⚠️ تم إزالة الأدمن من قائمة الحظر تلقائياً');
+    }
+}
 
 console.log(`🚀 جاري تشغيل ${BOT_NAME} (تيليغرام)...`);
 cleanPdfCache();
