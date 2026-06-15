@@ -1,0 +1,12 @@
+# =========================================================
+# MedTerm AI — Telegram Bot
+# =========================================================
+
+# توكن البوت — احصل عليه من @BotFather على تيليغرام
+TELEGRAM_BOT_TOKEN=PASTE_YOUR_BOT_TOKEN_HERE
+
+# Telegram ID الخاص بك كأدمن — احصل عليه من @userinfobot
+TELEGRAM_ADMIN_ID=PASTE_YOUR_TELEGRAM_ID_HERE
+
+# مفتاح Mistral AI
+MISTRAL_API_KEY=PASTE_YOUR_MISTRAL_KEY_HERE
