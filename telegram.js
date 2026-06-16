@@ -1880,11 +1880,13 @@ async function handleMessage(update) {
     // ── جلب صورة Wikipedia تلقائياً إذا الموضوع مرئي ──
     if (needsVisualContext(body, res)) {
         try {
-            const searchTerm = extractSearchTerm(body, res);
-            const imgResult  = await fetchWikipediaImage(searchTerm);
-            if (imgResult) {
-                const sent = await tgSendWikiImage(chatId, imgResult, msgId);
-                if (sent) console.log(`[wiki] ✅ أُرسلت صورة: ${imgResult.title}`);
+            const searchTerm = await getWikiSearchTerm(body, res);
+            if (searchTerm) {
+                const imgResult = await fetchWikipediaImage(searchTerm);
+                if (imgResult) {
+                    const sent = await tgSendWikiImage(chatId, imgResult, msgId);
+                    if (sent) console.log(`[wiki] ✅ أُرسلت صورة: ${imgResult.title}`);
+                }
             }
         } catch(e) {
             console.warn('[wiki] فشل جلب الصورة:', e.message);
@@ -1903,7 +1905,8 @@ async function handleMessage(update) {
 }
 
 // ============================================================
-// WIKIPEDIA IMAGE — جلب صورة تلقائي لأي موضوع مرئي
+// ============================================================
+// WIKIPEDIA IMAGE — بحث دقيق بمساعدة الذكاء الاصطناعي
 // ============================================================
 
 function needsVisualContext(body, aiReply) {
@@ -1911,81 +1914,92 @@ function needsVisualContext(body, aiReply) {
     return /عضو|جهاز|حيوان|طائر|سمكة|نبات|شجرة|زهرة|عظمة|عضلة|وريد|شريان|خلية|بكتيريا|فيروس|دواء|علاج|آلة|معدة|كبد|قلب|رئة|كلية|دماغ|مخ|عصب|جلد|غدة|هرمون|بروتين|ذرة|كيمياء|فيزياء|هندسة|حشرة|زواحف|ثدييات|قارة|مدينة|دولة|برج|جسر|معلم|شخصية|عالم|مخترع|رياضي|نجم|كوكب|مجرة|جبل|نهر|بحيرة|محيط|صحراء|غابة|حاسوب|ديناصور|كائن|organism|animal|organ|muscle|bone|cell|bacteria|virus|drug|medicine|plant|flower|tree|bird|fish|insect|reptile|mammal|planet|star|galaxy|city|country|tower|bridge|mountain|river|lake|ocean|forest|computer|fossil|anatomy|chemistry|physics|engineering|scientist|inventor|monument|landmark/i.test(combined);
 }
 
-function extractSearchTerm(body, aiReply) {
-    const bodyClean = body
-        .replace(/^(?:ما هو|ما هي|اشرح|شرح|عرف|عرّف|تعريف|معلومات عن|معلومات|كيف|لماذا|متى|أين|من هو|من هي)\s+/i, '')
-        .replace(/[؟?!.،,]/g, '')
-        .trim();
-    if (bodyClean.length >= 3 && bodyClean.length <= 60) return bodyClean;
-    const firstLine = aiReply.split('\n')[0].replace(/^(?:هو|هي|يُعرَّف|يعرف)\s+/i, '').slice(0, 50).trim();
-    return firstLine || bodyClean;
-}
-
-async function translateForWiki(term) {
-    if (!/[\u0600-\u06FF]/.test(term)) return term;
+async function getWikiSearchTerm(userQuery, aiReply) {
     try {
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=ar&tl=en&dt=t&q=${encodeURIComponent(term)}`;
-        const res = await fetchWithTimeout(url, { headers:{'User-Agent':'Mozilla/5.0'} }, 6_000);
-        if (res.ok) {
-            const data = await res.json();
-            const translated = data?.[0]?.filter(Boolean)?.map(i=>i?.[0])?.filter(Boolean)?.join('')||'';
-            if (translated.trim()) return translated.trim();
-        }
-    } catch {}
-    return term;
+        const prompt =
+            `المستخدم سأل: "${userQuery}"\n` +
+            `الرد كان عن: "${aiReply.slice(0, 300)}"\n\n` +
+            `اكتب اسم صفحة Wikipedia الإنجليزية الأدق لهذا الموضوع.\n` +
+            `القواعد:\n` +
+            `- اسم واحد فقط بالإنجليزي\n` +
+            `- الاسم الرسمي الدقيق (مثال: Human heart, Albert Einstein, Eiffel Tower)\n` +
+            `- إذا عالم أو شخصية: اسمه الكامل بالإنجليزي\n` +
+            `- إذا عضو أو جهاز: اسمه الطبي الدقيق\n` +
+            `- لا تضيف أي كلمة أخرى\n` +
+            `الجواب (اسم واحد فقط):`;
+        const term = await callMistral({
+            model: 'mistral-small-latest',
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: 20,
+            temperature: 0.1
+        });
+        const clean = term.trim().replace(/^["'\-*•]+|["'\-*•]+$/g, '').trim();
+        console.log(`[wiki] مصطلح البحث: "${clean}"`);
+        return clean || null;
+    } catch(e) {
+        console.warn('[wiki] فشل:', e.message);
+        return null;
+    }
 }
 
 async function fetchWikipediaImage(searchTerm) {
     try {
-        const enTerm = await translateForWiki(searchTerm);
-        if (!enTerm) return null;
-
-        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(enTerm)}&srlimit=1&format=json&origin=*`;
+        if (!searchTerm) return null;
+        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(searchTerm)}&srlimit=3&format=json&origin=*`;
         const searchRes = await fetchWithTimeout(searchUrl, {}, 8_000);
         if (!searchRes.ok) return null;
         const searchData = await searchRes.json();
-        const pageTitle  = searchData?.query?.search?.[0]?.title;
-        if (!pageTitle) return null;
-
-        const imgUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(pageTitle)}&prop=pageimages&pithumbsize=800&format=json&origin=*`;
+        const results = searchData?.query?.search || [];
+        if (!results.length) return null;
+        let pageTitle = results[0].title;
+        for (const r of results) {
+            if (r.title.toLowerCase().includes(searchTerm.toLowerCase().split(' ')[0])) {
+                pageTitle = r.title; break;
+            }
+        }
+        const imgUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(pageTitle)}&prop=pageimages&pithumbsize=1200&format=json&origin=*`;
         const imgRes = await fetchWithTimeout(imgUrl, {}, 8_000);
         if (!imgRes.ok) return null;
         const imgData = await imgRes.json();
         const pages   = imgData?.query?.pages || {};
         const page    = Object.values(pages)[0];
-        const imgSrc  = page?.thumbnail?.source;
-
-        if (!imgSrc) {
-            const commonsUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(pageTitle)}&prop=images&imlimit=5&format=json&origin=*`;
-            const commonsRes = await fetchWithTimeout(commonsUrl, {}, 8_000);
-            if (!commonsRes.ok) return null;
-            const commonsData = await commonsRes.json();
-            const commonsPage = Object.values(commonsData?.query?.pages||{})[0];
-            const imgFile = commonsPage?.images?.find(i => /\.(jpg|jpeg|png)/i.test(i.title))?.title;
-            if (!imgFile) return null;
-            const fileUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(imgFile)}&prop=imageinfo&iiprop=url&format=json&origin=*`;
-            const fileRes = await fetchWithTimeout(fileUrl, {}, 8_000);
-            if (!fileRes.ok) return null;
-            const fileData = await fileRes.json();
-            const filePages = fileData?.query?.pages || {};
-            const url = Object.values(filePages)[0]?.imageinfo?.[0]?.url;
-            if (!url) return null;
-            return { url, title: pageTitle };
+        let imgSrc    = page?.thumbnail?.source;
+        if (imgSrc) {
+            imgSrc = imgSrc.replace(/\/\d+px-/, '/1200px-');
+            return { url: imgSrc, title: pageTitle };
         }
-
-        return { url: imgSrc, title: pageTitle };
+        const listUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(pageTitle)}&prop=images&imlimit=10&format=json&origin=*`;
+        const listRes = await fetchWithTimeout(listUrl, {}, 8_000);
+        if (!listRes.ok) return null;
+        const listData = await listRes.json();
+        const listPage = Object.values(listData?.query?.pages||{})[0];
+        const imgFiles = (listPage?.images || []).filter(i => {
+            const name = i.title.toLowerCase();
+            return /\.(jpg|jpeg|png)/i.test(name) && !name.includes('icon') &&
+                   !name.includes('logo') && !name.includes('flag') &&
+                   !name.includes('map') && !name.includes('symbol');
+        });
+        if (!imgFiles.length) return null;
+        const fileTitle = imgFiles[0].title;
+        const fileUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(fileTitle)}&prop=imageinfo&iiprop=url&iiurlwidth=1200&format=json&origin=*`;
+        const fileRes = await fetchWithTimeout(fileUrl, {}, 8_000);
+        if (!fileRes.ok) return null;
+        const fileData = await fileRes.json();
+        const filePages = fileData?.query?.pages || {};
+        const url = Object.values(filePages)[0]?.imageinfo?.[0]?.url;
+        if (!url) return null;
+        return { url, title: pageTitle };
     } catch(e) {
         console.error('[fetchWikipediaImage]', e.message);
         return null;
     }
 }
 
-// إرسال صورة Wikipedia في تيليغرام
 async function tgSendWikiImage(chatId, imgResult, replyToId=null) {
     try {
         const form = new FormData();
         form.append('chat_id', String(chatId));
-        form.append('photo', imgResult.url); // تيليغرام يقبل URL مباشرة
+        form.append('photo', imgResult.url);
         form.append('caption', `📸 ${imgResult.title} — Wikipedia`);
         if (replyToId) form.append('reply_to_message_id', String(replyToId));
         const res = await fetchWithTimeout(`${TG_API}/sendPhoto`, { method:'POST', body:form }, 30_000);
@@ -1997,6 +2011,7 @@ async function tgSendWikiImage(chatId, imgResult, replyToId=null) {
         return false;
     }
 }
+
 
 
 let _offset = 0;
