@@ -1908,7 +1908,7 @@ async function handleMessage(update) {
 
 function needsVisualContext(body, aiReply) {
     const combined = (body + ' ' + aiReply).toLowerCase();
-    return /\b(?:عضو|جهاز|حيوان|طائر|سمكة|نبات|شجرة|زهرة|عظمة|عضلة|وريد|شريان|خلية|بكتيريا|فيروس|دواء|علاج|آلة|معدة|كبد|قلب|رئة|كلية|دماغ|مخ|عصب|جلد|عمود فقري|مفصل|غدة|هرمون|بروتين|جزيء|ذرة|كيمياء|فيزياء|هندسة|حشرة|زواحف|ثدييات|قارة|مدينة|دولة|برج|جسر|معلم|شخصية|عالم|مخترع|رياضي|نجم|كوكب|مجرة|منظومة|تضاريس|جبل|نهر|بحيرة|محيط|صحراء|غابة|حاسوب|معالج|دائرة|تقنية|معمار|منشأة|حفرية|ديناصور|كائن|organism|animal|organ|muscle|bone|cell|bacteria|virus|drug|medicine|plant|flower|tree|bird|fish|insect|reptile|mammal|planet|star|galaxy|city|country|tower|bridge|mountain|river|lake|ocean|desert|forest|computer|circuit|fossil|dinosaur|anatomy|chemistry|physics|engineering)/i.test(combined);
+    return /عضو|جهاز|حيوان|طائر|سمكة|نبات|شجرة|زهرة|عظمة|عضلة|وريد|شريان|خلية|بكتيريا|فيروس|دواء|علاج|آلة|معدة|كبد|قلب|رئة|كلية|دماغ|مخ|عصب|جلد|غدة|هرمون|بروتين|ذرة|كيمياء|فيزياء|هندسة|حشرة|زواحف|ثدييات|قارة|مدينة|دولة|برج|جسر|معلم|شخصية|عالم|مخترع|رياضي|نجم|كوكب|مجرة|جبل|نهر|بحيرة|محيط|صحراء|غابة|حاسوب|ديناصور|كائن|organism|animal|organ|muscle|bone|cell|bacteria|virus|drug|medicine|plant|flower|tree|bird|fish|insect|reptile|mammal|planet|star|galaxy|city|country|tower|bridge|mountain|river|lake|ocean|forest|computer|fossil|anatomy|chemistry|physics|engineering|scientist|inventor|monument|landmark/i.test(combined);
 }
 
 function extractSearchTerm(body, aiReply) {
