@@ -1877,6 +1877,20 @@ async function handleMessage(update) {
     }
     await reply(finalRes);
 
+    // ── جلب صورة Wikipedia تلقائياً إذا الموضوع مرئي ──
+    if (needsVisualContext(body, res)) {
+        try {
+            const searchTerm = extractSearchTerm(body, res);
+            const imgResult  = await fetchWikipediaImage(searchTerm);
+            if (imgResult) {
+                const sent = await tgSendWikiImage(chatId, imgResult, msgId);
+                if (sent) console.log(`[wiki] ✅ أُرسلت صورة: ${imgResult.title}`);
+            }
+        } catch(e) {
+            console.warn('[wiki] فشل جلب الصورة:', e.message);
+        }
+    }
+
     // نطق المصطلحات الطبية التلقائي
     if (isMedicalQuery(body) && res.length>50) {
         const medTermMatch = res.match(/\b([A-Z][a-z]+(?:in|ol|ine|ate|ide|ase|itis|osis|emia|uria|pathy|logy)\b)/);
@@ -1889,8 +1903,102 @@ async function handleMessage(update) {
 }
 
 // ============================================================
-// POLLING — التشغيل بدون Webhook (أبسط على Termux)
+// WIKIPEDIA IMAGE — جلب صورة تلقائي لأي موضوع مرئي
 // ============================================================
+
+function needsVisualContext(body, aiReply) {
+    const combined = (body + ' ' + aiReply).toLowerCase();
+    return /\b(?:عضو|جهاز|حيوان|طائر|سمكة|نبات|شجرة|زهرة|عظمة|عضلة|وريد|شريان|خلية|بكتيريا|فيروس|دواء|علاج|آلة|معدة|كبد|قلب|رئة|كلية|دماغ|مخ|عصب|جلد|عمود فقري|مفصل|غدة|هرمون|بروتين|جزيء|ذرة|كيمياء|فيزياء|هندسة|حشرة|زواحف|ثدييات|قارة|مدينة|دولة|برج|جسر|معلم|شخصية|عالم|مخترع|رياضي|نجم|كوكب|مجرة|منظومة|تضاريس|جبل|نهر|بحيرة|محيط|صحراء|غابة|حاسوب|معالج|دائرة|تقنية|معمار|منشأة|حفرية|ديناصور|كائن|organism|animal|organ|muscle|bone|cell|bacteria|virus|drug|medicine|plant|flower|tree|bird|fish|insect|reptile|mammal|planet|star|galaxy|city|country|tower|bridge|mountain|river|lake|ocean|desert|forest|computer|circuit|fossil|dinosaur|anatomy|chemistry|physics|engineering)/i.test(combined);
+}
+
+function extractSearchTerm(body, aiReply) {
+    const bodyClean = body
+        .replace(/^(?:ما هو|ما هي|اشرح|شرح|عرف|عرّف|تعريف|معلومات عن|معلومات|كيف|لماذا|متى|أين|من هو|من هي)\s+/i, '')
+        .replace(/[؟?!.،,]/g, '')
+        .trim();
+    if (bodyClean.length >= 3 && bodyClean.length <= 60) return bodyClean;
+    const firstLine = aiReply.split('\n')[0].replace(/^(?:هو|هي|يُعرَّف|يعرف)\s+/i, '').slice(0, 50).trim();
+    return firstLine || bodyClean;
+}
+
+async function translateForWiki(term) {
+    if (!/[\u0600-\u06FF]/.test(term)) return term;
+    try {
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=ar&tl=en&dt=t&q=${encodeURIComponent(term)}`;
+        const res = await fetchWithTimeout(url, { headers:{'User-Agent':'Mozilla/5.0'} }, 6_000);
+        if (res.ok) {
+            const data = await res.json();
+            const translated = data?.[0]?.filter(Boolean)?.map(i=>i?.[0])?.filter(Boolean)?.join('')||'';
+            if (translated.trim()) return translated.trim();
+        }
+    } catch {}
+    return term;
+}
+
+async function fetchWikipediaImage(searchTerm) {
+    try {
+        const enTerm = await translateForWiki(searchTerm);
+        if (!enTerm) return null;
+
+        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(enTerm)}&srlimit=1&format=json&origin=*`;
+        const searchRes = await fetchWithTimeout(searchUrl, {}, 8_000);
+        if (!searchRes.ok) return null;
+        const searchData = await searchRes.json();
+        const pageTitle  = searchData?.query?.search?.[0]?.title;
+        if (!pageTitle) return null;
+
+        const imgUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(pageTitle)}&prop=pageimages&pithumbsize=800&format=json&origin=*`;
+        const imgRes = await fetchWithTimeout(imgUrl, {}, 8_000);
+        if (!imgRes.ok) return null;
+        const imgData = await imgRes.json();
+        const pages   = imgData?.query?.pages || {};
+        const page    = Object.values(pages)[0];
+        const imgSrc  = page?.thumbnail?.source;
+
+        if (!imgSrc) {
+            const commonsUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(pageTitle)}&prop=images&imlimit=5&format=json&origin=*`;
+            const commonsRes = await fetchWithTimeout(commonsUrl, {}, 8_000);
+            if (!commonsRes.ok) return null;
+            const commonsData = await commonsRes.json();
+            const commonsPage = Object.values(commonsData?.query?.pages||{})[0];
+            const imgFile = commonsPage?.images?.find(i => /\.(jpg|jpeg|png)/i.test(i.title))?.title;
+            if (!imgFile) return null;
+            const fileUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(imgFile)}&prop=imageinfo&iiprop=url&format=json&origin=*`;
+            const fileRes = await fetchWithTimeout(fileUrl, {}, 8_000);
+            if (!fileRes.ok) return null;
+            const fileData = await fileRes.json();
+            const filePages = fileData?.query?.pages || {};
+            const url = Object.values(filePages)[0]?.imageinfo?.[0]?.url;
+            if (!url) return null;
+            return { url, title: pageTitle };
+        }
+
+        return { url: imgSrc, title: pageTitle };
+    } catch(e) {
+        console.error('[fetchWikipediaImage]', e.message);
+        return null;
+    }
+}
+
+// إرسال صورة Wikipedia في تيليغرام
+async function tgSendWikiImage(chatId, imgResult, replyToId=null) {
+    try {
+        const form = new FormData();
+        form.append('chat_id', String(chatId));
+        form.append('photo', imgResult.url); // تيليغرام يقبل URL مباشرة
+        form.append('caption', `📸 ${imgResult.title} — Wikipedia`);
+        if (replyToId) form.append('reply_to_message_id', String(replyToId));
+        const res = await fetchWithTimeout(`${TG_API}/sendPhoto`, { method:'POST', body:form }, 30_000);
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.description);
+        return true;
+    } catch(e) {
+        console.warn('[tgSendWikiImage]', e.message);
+        return false;
+    }
+}
+
+
 let _offset = 0;
 let _isRunning = true;
 
