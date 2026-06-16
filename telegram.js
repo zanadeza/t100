@@ -191,7 +191,20 @@ function getSystemPrompt() {
     const today = now.toDateString();
     if (_cachedPromptDate !== today) {
         _cachedPromptDate = today;
-        _cachedSystemPrompt = `اسمك "MedTerm"، مساعد ذكاء اصطناعي شامل على تيليغرام.\nالتاريخ: ${dateStr} - ${timeStr} (القدس). استخدمه دائماً عند السؤال عن التاريخ.\n\nشخصيتك: مهني ودقيق، ردود مباشرة بدون حشو. اللغة الافتراضية عربية، تجيب بلغة المستخدم فوراً. تجيب على أي سؤال في أي مجال بدون استثناء.\n\nالتنسيق (تيليغرام يدعم Markdown):\n• استخدم *نص* للعريض و_نص_ للمائل\n• استخدم \`كود\` للكود البرمجي\n• يمكن استخدام العناوين والقوائم بشكل طبيعي\n\nمجالاتك: طب، علوم، برمجة، قانون، دين، تاريخ، أعمال، ترجمة، أدب، طبخ، وأي موضوع آخر.\nاسم المستخدم في السياق، استخدمه أحياناً بشكل طبيعي.`;
+        _cachedSystemPrompt =
+            `اسمك "MedTerm"، مساعد ذكاء اصطناعي شامل على تيليغرام.\n` +
+            `التاريخ: ${dateStr} - ${timeStr} (القدس). استخدمه دائماً عند السؤال عن التاريخ.\n\n` +
+            `شخصيتك: مهني ودقيق، ردود مباشرة بدون حشو. اللغة الافتراضية عربية، تجيب بلغة المستخدم فوراً. تجيب على أي سؤال في أي مجال بدون استثناء.\n\n` +
+            `قواعد الكتابة — مهمة جداً:\n` +
+            `• لا تستخدم النجوم * أبداً في ردودك\n` +
+            `• لا تستخدم الشرطة السفلية _ للتنسيق\n` +
+            `• لا تستخدم # للعناوين\n` +
+            `• لا تستخدم أي رموز Markdown\n` +
+            `• اكتب بنص عادي واضح فقط\n` +
+            `• للتعداد استخدم الأرقام (1. 2. 3.) أو النقطة •\n` +
+            `• الكود البرمجي فقط يمكن كتابته بين علامتي backtick\n\n` +
+            `مجالاتك: طب، علوم، برمجة، قانون، دين، تاريخ، أعمال، ترجمة، أدب، طبخ، وأي موضوع آخر.\n` +
+            `اسم المستخدم في السياق، استخدمه أحياناً بشكل طبيعي.`;
     }
     return _cachedSystemPrompt;
 }
@@ -653,7 +666,19 @@ async function tgRequest(method, body={}) {
     return data.result;
 }
 
+// إرسال رسالة عادية — بدون Markdown (للمستخدمين)
 async function tgSend(chatId, text, extra={}) {
+    // نحذف أي نجوم متبقية من رد الـ AI احتياطاً
+    const cleanText = (text||'').replace(/\*([^*]+)\*/g, '$1').replace(/\_([^_]+)\_/g, '$1');
+    const chunks = splitTgMessage(cleanText);
+    for (let i=0; i<chunks.length; i++) {
+        await tgRequest('sendMessage', { chat_id:chatId, text:chunks[i], ...extra });
+        if (i<chunks.length-1) await new Promise(r=>setTimeout(r,300));
+    }
+}
+
+// إرسال رسالة بـ Markdown — للوحة التحكم والأدمن فقط
+async function tgSendMD(chatId, text, extra={}) {
     const chunks = splitTgMessage(text);
     for (let i=0; i<chunks.length; i++) {
         await tgRequest('sendMessage', { chat_id:chatId, text:chunks[i], parse_mode:'Markdown', ...extra });
@@ -987,7 +1012,7 @@ async function handleCallback(update) {
                 vipExpiry[id] = Date.now()+30*24*60*60_000;
                 resetUserUsage(id);
                 saveData();
-                await tgSend(id, '🌟 *تهانينا! تم تفعيل اشتراكك المميز (VIP)*\nرسائل وصور وصوت غير محدودة ✨').catch(()=>{});
+                await tgSend(id, 'تهانينا! تم تفعيل اشتراكك المميز (VIP)\nرسائل وصور وصوت غير محدودة ✨').catch(()=>{});
                 await tgRequest('answerCallbackQuery',{callback_query_id:cb.id,text:`✅ تم تفعيل VIP للـ ID: ${id}`,show_alert:true}).catch(()=>{});
             }
             const page = 0;
@@ -1143,7 +1168,7 @@ async function handleAdminInput(chatId, senderId, text, msgId) {
                 vipExpiry[id] = Date.now()+30*24*60*60_000;
                 resetUserUsage(id);
                 saveData();
-                await tgSend(id, '🌟 *تهانينا! تم تفعيل اشتراكك المميز (VIP)*\nرسائل وصور وصوت غير محدودة ✨').catch(()=>{});
+                await tgSend(id, 'تهانينا! تم تفعيل اشتراكك المميز (VIP)\nرسائل وصور وصوت غير محدودة ✨').catch(()=>{});
                 await tgSend(chatId, `✅ تم تفعيل VIP للـ ID: \`${id}\` (${userNames[id]||'مستخدم'})`);
             } else {
                 await tgSend(chatId, `⚠️ \`${id}\` VIP أصلاً.`);
@@ -1202,7 +1227,7 @@ async function handleAdminInput(chatId, senderId, text, msgId) {
             if (!msg) { await sendDashboard(chatId, dashMsgId); return true; }
             const allUsers = Object.keys(welcomedUsers).filter(id=>id!==String(ADMIN_TG_ID));
             let sent=0, failed=0;
-            await tgSend(chatId, `📢 جاري الإرسال لـ ${allUsers.length} مستخدم...`);
+            await tgSendMD(chatId, `📢 جاري الإرسال لـ ${allUsers.length} مستخدم...`);
             for (const uid of allUsers) {
                 try { await tgSend(uid, msg); sent++; await new Promise(r=>setTimeout(r,300)); }
                 catch { failed++; }
@@ -1339,7 +1364,7 @@ async function handleMessage(update) {
                 vipExpiry[num] = Date.now()+30*24*60*60_000;
                 resetUserUsage(num);
                 saveData();
-                await tgSend(num, '🌟 *تهانينا! تم تفعيل اشتراكك المميز (VIP)*\nرسائل وصور وصوت غير محدودة ✨').catch(()=>{});
+                await tgSend(num, 'تهانينا! تم تفعيل اشتراكك المميز (VIP)\nرسائل وصور وصوت غير محدودة ✨').catch(()=>{});
                 await reply(`✅ تم تفعيل VIP للـ ID: ${num} لمدة شهر.`);
             } else {
                 await reply(`⚠️ ${num} VIP أصلاً.`);
